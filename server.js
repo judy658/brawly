@@ -17,10 +17,13 @@ const io = new Server(server, {
 // HARİTA VE FİZİK AYARLARI
 const MAP_WIDTH = 2000;
 const MAP_HEIGHT = 2000;
-const PLAYER_RADIUS = 30; // Oyuncu hitbox
-const OBSTACLE_SIZE = 100; // Görsel Boyut
-const OBSTACLE_HIT_SIZE = 70; // Gerçek Çarpışma Boyutu (Küçültüldü)
-const OBSTACLE_OFFSET = 15; // Hitbox'ı merkeze almak için 15 piksel boşluk
+const PLAYER_RADIUS = 30;
+const OBSTACLE_SIZE = 100;
+const OBSTACLE_HIT_SIZE = 70;
+const OBSTACLE_OFFSET = 15;
+const BULLET_DAMAGE = 20; // Her mermi 20 hasar verir
+const MAX_HP = 100;
+const RESPAWN_DELAY = 3000; // 3 saniye bekleme
 
 // Rastgele ve Üst Üste Binmeyen Engeller Oluştur
 const obstacles = [];
@@ -46,15 +49,10 @@ for (let i = 0; i < NUM_OBSTACLES; i++) {
   
   if (!overlap) {
     obstacles.push({
-      x: x,
-      y: y,
-      width: OBSTACLE_SIZE,
-      height: OBSTACLE_SIZE,
-      // Hitbox sınırları
-      hitX: x + OBSTACLE_OFFSET,
-      hitY: y + OBSTACLE_OFFSET,
-      hitW: OBSTACLE_HIT_SIZE,
-      hitH: OBSTACLE_HIT_SIZE
+      x: x, y: y,
+      width: OBSTACLE_SIZE, height: OBSTACLE_SIZE,
+      hitX: x + OBSTACLE_OFFSET, hitY: y + OBSTACLE_OFFSET,
+      hitW: OBSTACLE_HIT_SIZE, hitH: OBSTACLE_HIT_SIZE
     });
   }
 }
@@ -62,58 +60,101 @@ for (let i = 0; i < NUM_OBSTACLES; i++) {
 const players = {};
 let bullets = [];
 let bulletIdCounter = 0;
+let killFeed = []; // Son öldürme bildirimleri
 
-// Çarpışma (AABB - Daire vs Dikdörtgen)
+// Güvenli doğma noktası bul (engellerden uzak)
+function findSafeSpawn() {
+  let x, y, safe;
+  let attempts = 0;
+  do {
+    safe = true;
+    x = 100 + Math.floor(Math.random() * (MAP_WIDTH - 200));
+    y = 100 + Math.floor(Math.random() * (MAP_HEIGHT - 200));
+    
+    for (let obs of obstacles) {
+      let dx = x - Math.max(obs.hitX, Math.min(x, obs.hitX + obs.hitW));
+      let dy = y - Math.max(obs.hitY, Math.min(y, obs.hitY + obs.hitH));
+      if ((dx*dx + dy*dy) < (80*80)) { safe = false; break; }
+    }
+    attempts++;
+  } while (!safe && attempts < 50);
+  return { x, y };
+}
+
+// Çarpışma Kontrolü (Oyuncu hareketi)
 function checkCollision(px, py, radius) {
-  if (px < radius) return true;
-  if (py < radius) return true;
-  if (px > MAP_WIDTH - radius) return true;
-  if (py > MAP_HEIGHT - radius) return true;
-
+  if (px < radius || py < radius || px > MAP_WIDTH - radius || py > MAP_HEIGHT - radius) return true;
   for (let obs of obstacles) {
     let closestX = Math.max(obs.hitX, Math.min(px, obs.hitX + obs.hitW));
     let closestY = Math.max(obs.hitY, Math.min(py, obs.hitY + obs.hitH));
-    let distanceX = px - closestX;
-    let distanceY = py - closestY;
-    if ((distanceX * distanceX) + (distanceY * distanceY) < (radius * radius)) {
-      return true;
-    }
+    let dx = px - closestX, dy = py - closestY;
+    if ((dx*dx + dy*dy) < (radius*radius)) return true;
   }
   return false;
 }
 
-// Mermi vs Dikdörtgen Çarpışması
+// Mermi Çarpışma Kontrolü
 function checkBulletCollision(bx, by, bradius) {
   if (bx < bradius || by < bradius || bx > MAP_WIDTH - bradius || by > MAP_HEIGHT - bradius) return true;
-
   for (let obs of obstacles) {
     let closestX = Math.max(obs.hitX, Math.min(bx, obs.hitX + obs.hitW));
     let closestY = Math.max(obs.hitY, Math.min(by, obs.hitY + obs.hitH));
-    let distanceX = bx - closestX;
-    let distanceY = by - closestY;
-    if ((distanceX * distanceX) + (distanceY * distanceY) < (bradius * bradius)) {
-      return true;
-    }
+    let dx = bx - closestX, dy = by - closestY;
+    if ((dx*dx + dy*dy) < (bradius*bradius)) return true;
   }
   return false;
+}
+
+// Oyuncuyu öldür ve belirli süre sonra yeniden doğur
+function killPlayer(victimId, killerId) {
+  if (!players[victimId]) return;
+  
+  let killerName = players[killerId] ? players[killerId].email : '???';
+  let victimName = players[victimId].email;
+  
+  players[victimId].alive = false;
+  
+  // Kill Feed'e ekle
+  let feedItem = { killer: killerName, victim: victimName, time: Date.now() };
+  killFeed.push(feedItem);
+  if (killFeed.length > 5) killFeed.shift(); // Son 5 bildirimi tut
+  
+  io.emit('killEvent', feedItem);
+  
+  // Belirli süre sonra yeniden doğur
+  setTimeout(() => {
+    if (players[victimId]) {
+      let spawn = findSafeSpawn();
+      players[victimId].x = spawn.x;
+      players[victimId].y = spawn.y;
+      players[victimId].hp = MAX_HP;
+      players[victimId].alive = true;
+      io.emit('playerRespawned', { id: victimId, x: spawn.x, y: spawn.y });
+    }
+  }, RESPAWN_DELAY);
 }
 
 io.on('connection', (socket) => {
   console.log(`Biri arenaya katıldı: ${socket.id}`);
 
+  let spawn = findSafeSpawn();
   players[socket.id] = {
     id: socket.id,
-    x: MAP_WIDTH / 2,
-    y: MAP_HEIGHT / 2,
+    x: spawn.x,
+    y: spawn.y,
     email: 'misafir',
-    charId: 'Acemi'
+    charId: 'Acemi',
+    hp: MAX_HP,
+    maxHp: MAX_HP,
+    alive: true
   };
 
   socket.emit('initGame', { 
     players: players, 
     obstacles: obstacles,
     mapWidth: MAP_WIDTH,
-    mapHeight: MAP_HEIGHT
+    mapHeight: MAP_HEIGHT,
+    killFeed: killFeed
   });
 
   socket.broadcast.emit('newPlayer', { id: socket.id, playerInfo: players[socket.id] });
@@ -127,7 +168,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('playerMovement', (movementData) => {
-    if (players[socket.id]) {
+    if (players[socket.id] && players[socket.id].alive) {
       if (!checkCollision(movementData.x, movementData.y, PLAYER_RADIUS)) {
         players[socket.id].x = movementData.x;
         players[socket.id].y = movementData.y;
@@ -137,23 +178,20 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Ateş Etme İsteği
   socket.on('shoot', (angle) => {
-    if (players[socket.id]) {
+    if (players[socket.id] && players[socket.id].alive) {
       let p = players[socket.id];
-      // Karakterin namlusundan (azıcık önünden) mermi çıksın
       let startX = p.x + Math.cos(angle) * 40;
       let startY = p.y + Math.sin(angle) * 40;
       
       bullets.push({
         id: bulletIdCounter++,
         owner: socket.id,
-        x: startX,
-        y: startY,
-        vx: Math.cos(angle) * 15, // Mermi hızı
+        x: startX, y: startY,
+        vx: Math.cos(angle) * 15,
         vy: Math.sin(angle) * 15,
         radius: 8,
-        life: 60 // Mermi 60 frame sonra kaybolsun (menzil)
+        life: 60
       });
     }
   });
@@ -165,7 +203,7 @@ io.on('connection', (socket) => {
   });
 });
 
-// SUNUCU OYUN DÖNGÜSÜ (Mermiler ve Güncellemeler İçin - Saniyede 60 Kare)
+// SUNUCU OYUN DÖNGÜSÜ (60 FPS)
 setInterval(() => {
   let activeBullets = [];
   
@@ -174,13 +212,11 @@ setInterval(() => {
     b.y += b.vy;
     b.life -= 1;
 
-    // Duvara Çarpma veya Süre Dolma
     let hitWall = checkBulletCollision(b.x, b.y, b.radius);
     let hitPlayer = null;
 
-    // Oyunculara Çarpma (Kendi hariç)
     for (let pid in players) {
-      if (pid !== b.owner) {
+      if (pid !== b.owner && players[pid].alive) {
         let target = players[pid];
         let dx = target.x - b.x;
         let dy = target.y - b.y;
@@ -192,9 +228,14 @@ setInterval(() => {
     }
 
     if (hitPlayer) {
-      // Vuruldu logu (Can sistemi sonraki aşamalarda)
-      console.log(`${hitPlayer} vuruldu!`);
-      // Mermi yok olur, listeye eklenmez
+      // Hasar ver
+      players[hitPlayer].hp -= BULLET_DAMAGE;
+      
+      if (players[hitPlayer].hp <= 0) {
+        players[hitPlayer].hp = 0;
+        killPlayer(hitPlayer, b.owner);
+      }
+      // Mermi yok olur
     } else if (!hitWall && b.life > 0) {
       activeBullets.push(b);
     }
@@ -202,7 +243,6 @@ setInterval(() => {
   
   bullets = activeBullets;
 
-  // Tüm oyunculara güncel konumları ve mermileri gönder
   io.emit('gameState', {
     players: players,
     bullets: bullets
