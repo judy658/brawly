@@ -20,15 +20,37 @@ const MAP_HEIGHT = 2000;
 const PLAYER_RADIUS = 30; // Çarpışma kutusu (AABB) yarıçapı
 const OBSTACLE_SIZE = 100; // Her bir duvarın boyutu (100x100)
 
-// Rastgele engeller oluştur
+// Rastgele ve Üst Üste Binmeyen Engeller Oluştur
 const obstacles = [];
-for (let i = 0; i < 40; i++) {
-  obstacles.push({
-    x: Math.floor(Math.random() * (MAP_WIDTH - OBSTACLE_SIZE)),
-    y: Math.floor(Math.random() * (MAP_HEIGHT - OBSTACLE_SIZE)),
-    width: OBSTACLE_SIZE,
-    height: OBSTACLE_SIZE
-  });
+const NUM_OBSTACLES = 40;
+
+for (let i = 0; i < NUM_OBSTACLES; i++) {
+  let x, y, overlap;
+  let attempts = 0; // Sonsuz döngü koruması
+  do {
+    overlap = false;
+    x = Math.floor(Math.random() * (MAP_WIDTH - OBSTACLE_SIZE));
+    y = Math.floor(Math.random() * (MAP_HEIGHT - OBSTACLE_SIZE));
+    
+    // Diğer kutularla çakışma kontrolü (AABB)
+    for (let obs of obstacles) {
+      if (x < obs.x + obs.width && x + OBSTACLE_SIZE > obs.x &&
+          y < obs.y + obs.height && y + OBSTACLE_SIZE > obs.y) {
+          overlap = true;
+          break;
+      }
+    }
+    attempts++;
+  } while (overlap && attempts < 100);
+  
+  if (!overlap) {
+    obstacles.push({
+      x: x,
+      y: y,
+      width: OBSTACLE_SIZE,
+      height: OBSTACLE_SIZE
+    });
+  }
 }
 
 const players = {};
